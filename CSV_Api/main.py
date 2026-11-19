@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 # CONFIGURATION
 # ==========================================
  
-EXCEL_FILE = Path(__file__).parent / "Excel_Data.xlsx"
+EXCEL_FILE = "Excel_Data.xlsx"
  
 # This is the SQL table name, not the Excel filename.
 TABLE_NAME = "Bike_data"
