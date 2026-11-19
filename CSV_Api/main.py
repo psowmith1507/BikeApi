@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
  
  
 # Configuration
-EXCEL_FILE = "suppliers.xlsx"
+EXCEL_FILE = "Excel_Data.xlsx"
 TABLE_NAME = "suppliers"
 MAX_ROWS = 5000
  
