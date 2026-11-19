@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from contextlib import asynccontextmanager
  
+import duckdb
 import pandas as pd
 import sqlglot
 from sqlglot import exp
@@ -10,21 +11,18 @@ from fastapi import FastAPI, HTTPException, Query, Body
 from pydantic import BaseModel, Field
  
  
-# ==========================================
+# ==================================
 # CONFIGURATION
-# ==========================================
+# ==================================
  
 EXCEL_FILE = "Excel_Data.xlsx"
- 
-# This is the SQL table name, not the Excel filename.
 TABLE_NAME = "Bike_data"
- 
 MAX_ROWS = 5000
  
  
-# ==========================================
+# ==================================
 # LOAD EXCEL AT STARTUP
-# ==========================================
+# ==================================
  
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,208 +30,65 @@ async def lifespan(app: FastAPI):
     if not EXCEL_FILE.exists():
         raise RuntimeError(f"Excel file not found: {EXCEL_FILE}")
  
+    # Read Excel using Pandas
     df = pd.read_excel(EXCEL_FILE)
  
     df.columns = df.columns.astype(str).str.strip()
  
     if not df.columns.is_unique:
-        raise RuntimeError("Excel has duplicate column names")
+        raise RuntimeError("Duplicate Excel column names found")
  
-    app.state.df = df
+    # Create DuckDB in-memory connection
+    conn = duckdb.connect(
+        database=":memory:",
+        config={"enable_external_access": "false"}
+    )
+ 
+    # Register Pandas DataFrame
+    conn.register("excel_data", df)
+ 
+    # Create SQL table
+    conn.execute(f'''
+        CREATE TABLE "{TABLE_NAME}" AS
+        SELECT * FROM excel_data
+    ''')
+ 
+    app.state.db = conn
  
     print("Excel loaded successfully")
-    print("Total rows:", len(df))
+    print("Total records:", len(df))
     print("Available columns:", list(df.columns))
  
     yield
  
+    conn.close()
+ 
+ 
+# ==================================
+# FASTAPI APPLICATION
+# ==================================
  
 app = FastAPI(
-    title="Excel Pandas SQL API",
-    version="1.0",
+    title="Excel SQL Execution API",
+    version="2.0",
     lifespan=lifespan
 )
  
  
-# ==========================================
+# ==================================
 # REQUEST MODEL
-# ==========================================
+# ==================================
  
 class SQLRequest(BaseModel):
     query: str = Field(min_length=1, max_length=10000)
  
  
-# ==========================================
-# COLUMN VALIDATION
-# ==========================================
+# ==================================
+# SQL VALIDATION
+# ==================================
  
-def get_column(name, df):
+def validate_query(query):
  
-    matches = [
-        col for col in df.columns
-        if col.lower() == name.lower()
-    ]
- 
-    if not matches:
-        raise ValueError(f"Column not found: {name}")
- 
-    return matches[0]
- 
- 
-# ==========================================
-# GET SQL VALUES
-# ==========================================
- 
-def get_value(node, df):
- 
-    if isinstance(node, exp.Column):
- 
-        if node.table and node.table.lower() != TABLE_NAME.lower():
-            raise ValueError("Invalid table reference")
- 
-        column = get_column(node.name, df)
- 
-        return df[column]
- 
-    if isinstance(node, exp.Literal):
- 
-        if node.is_string:
-            return node.this
- 
-        try:
-            return float(node.this) if "." in node.this else int(node.this)
-        except ValueError:
-            raise ValueError("Invalid numeric value")
- 
-    if isinstance(node, exp.Null):
-        return None
- 
-    raise ValueError("Unsupported SQL value")
- 
- 
-# ==========================================
-# WHERE CONDITION PROCESSING
-# ==========================================
- 
-def evaluate_where(node, df):
- 
-    if isinstance(node, exp.Paren):
-        return evaluate_where(node.this, df)
- 
-    if isinstance(node, exp.And):
- 
-        return (
-            evaluate_where(node.this, df)
-            & evaluate_where(node.expression, df)
-        )
- 
-    if isinstance(node, exp.Or):
- 
-        return (
-            evaluate_where(node.this, df)
-            | evaluate_where(node.expression, df)
-        )
- 
-    if isinstance(node, exp.Not):
- 
-        return ~evaluate_where(node.this, df)
- 
-    left = node.this
-    right = node.expression
- 
-    left_value = get_value(left, df)
-    right_value = get_value(right, df)
- 
-    if isinstance(node, exp.EQ):
-        return left_value == right_value
- 
-    if isinstance(node, exp.NEQ):
-        return left_value != right_value
- 
-    if isinstance(node, exp.GT):
-        return left_value > right_value
- 
-    if isinstance(node, exp.GTE):
-        return left_value >= right_value
- 
-    if isinstance(node, exp.LT):
-        return left_value < right_value
- 
-    if isinstance(node, exp.LTE):
-        return left_value <= right_value
- 
-    if isinstance(node, exp.Is):
- 
-        if isinstance(right, exp.Null):
-            return left_value.isna()
- 
-    if isinstance(node, exp.In):
- 
-        values = [
-            get_value(value, df)
-            for value in node.expressions
-        ]
- 
-        return left_value.isin(values)
- 
-    if isinstance(node, exp.Like):
- 
-        pattern = str(right_value)
- 
-        regex = (
-            "^"
-            + "".join(
-                ".*" if char == "%"
-                else "." if char == "_"
-                else __import__("re").escape(char)
-                for char in pattern
-            )
-            + "$"
-        )
- 
-        return left_value.astype("string").str.match(
-            regex,
-            na=False
-        )
- 
-    raise ValueError("Unsupported WHERE condition")
- 
- 
-# ==========================================
-# AGGREGATE FUNCTIONS
-# ==========================================
- 
-def execute_aggregate(expression, df):
- 
-    if isinstance(expression, exp.Count):
- 
-        if isinstance(expression.this, exp.Star):
-            return len(df)
- 
-        return get_value(expression.this, df).count()
- 
-    if isinstance(expression, exp.Sum):
-        return get_value(expression.this, df).sum()
- 
-    if isinstance(expression, exp.Avg):
-        return get_value(expression.this, df).mean()
- 
-    if isinstance(expression, exp.Min):
-        return get_value(expression.this, df).min()
- 
-    if isinstance(expression, exp.Max):
-        return get_value(expression.this, df).max()
- 
-    raise ValueError("Unsupported aggregate function")
- 
- 
-# ==========================================
-# SQL TO PANDAS TRANSLATOR
-# ==========================================
- 
-def execute_pandas_query(query, df):
- 
-    # Parse SQL
     statements = sqlglot.parse(query, read="duckdb")
  
     if len(statements) != 1 or statements[0] is None:
@@ -241,229 +96,129 @@ def execute_pandas_query(query, df):
  
     parsed = statements[0]
  
-    # SELECT only
+    # Allow read-only SELECT statements
     if not isinstance(parsed, exp.Select):
         raise ValueError("Only SELECT queries are allowed")
  
-    # Reject unsupported SQL features
-    unsupported = [
-        "joins", "group", "having", "with",
-        "distinct", "qualify", "windows"
-    ]
+    # Reject commands and unsupported external data access
+    forbidden = (
+        exp.Command,
+        exp.Insert,
+        exp.Update,
+        exp.Delete,
+        exp.Drop,
+        exp.Create,
+        exp.Alter,
+        exp.Copy,
+        exp.Merge,
+    )
  
-    for feature in unsupported:
+    for node in parsed.walk():
+        if isinstance(node, forbidden):
+            raise ValueError("Only read-only SQL is allowed")
  
-        if parsed.args.get(feature):
-            raise ValueError(
-                f"{feature.upper()} is not supported"
-            )
+    # Permit the actual Excel table and CTE references
+    cte_names = {
+        cte.alias_or_name.lower()
+        for cte in parsed.find_all(exp.CTE)
+    }
  
-    # Validate table
     tables = list(parsed.find_all(exp.Table))
  
-    if len(tables) != 1:
-        raise ValueError("Only one table is allowed")
+    if not tables:
+        raise ValueError(
+            f"Query must use the {TABLE_NAME} table"
+        )
  
-    table = tables[0]
+    for table in tables:
  
-    if (
-        table.name.lower() != TABLE_NAME.lower()
-        or not isinstance(table.this, exp.Identifier)
-        or table.db
-        or table.catalog
-    ):
-        raise ValueError("Invalid table name")
+        if table.db or table.catalog:
+            raise ValueError("Qualified table access is not allowed")
  
-    working_df = df.copy()
+        name = table.name.lower()
  
-    # --------------------------------------
-    # WHERE
-    # --------------------------------------
- 
-    where = parsed.args.get("where")
- 
-    if where:
- 
-        mask = evaluate_where(where.this, working_df)
- 
-        working_df = working_df.loc[
-            mask.fillna(False)
-        ]
- 
-    # --------------------------------------
-    # SELECT
-    # --------------------------------------
- 
-    select_items = parsed.expressions
- 
-    aggregate_types = (
-        exp.Count,
-        exp.Sum,
-        exp.Avg,
-        exp.Min,
-        exp.Max
-    )
- 
-    has_aggregate = any(
-        isinstance(item.this if isinstance(item, exp.Alias) else item,
-                   aggregate_types)
-        for item in select_items
-    )
- 
-    if has_aggregate:
- 
-        if len(select_items) != 1:
+        if name != TABLE_NAME.lower() and name not in cte_names:
             raise ValueError(
-                "Use one aggregate expression per query"
+                f"Table not allowed: {table.name}"
             )
  
-        item = select_items[0]
+    return parsed
  
-        expression = (
-            item.this if isinstance(item, exp.Alias)
-            else item
+ 
+# ==================================
+# SQL EXECUTION
+# ==================================
+ 
+def execute_query(query):
+ 
+    # Parse and validate
+    parsed = validate_query(query)
+ 
+    # Convert parsed SQL into DuckDB SQL
+    safe_query = parsed.sql(dialect="duckdb")
+ 
+    # Execute query and retrieve at most 5001 records
+    cursor = app.state.db.execute(safe_query)
+ 
+    columns = [item[0] for item in cursor.description]
+ 
+    rows = cursor.fetchmany(MAX_ROWS + 1)
+ 
+    truncated = len(rows) > MAX_ROWS
+ 
+    rows = rows[:MAX_ROWS]
+ 
+    # Convert result into Pandas DataFrame
+    result_df = pd.DataFrame(rows, columns=columns)
+ 
+    # Convert DataFrame to JSON-compatible records
+    records = json.loads(
+        result_df.to_json(
+            orient="records",
+            date_format="iso"
         )
+    )
  
-        alias = (
-            item.alias if isinstance(item, exp.Alias)
-            else expression.sql()
-        )
- 
-        value = execute_aggregate(expression, working_df)
- 
-        result = pd.DataFrame([{alias: value}])
- 
-    else:
- 
-        columns = []
- 
-        for item in select_items:
- 
-            if isinstance(item, exp.Star):
- 
-                columns.extend(working_df.columns.tolist())
- 
-            elif isinstance(item, exp.Column):
- 
-                columns.append(
-                    get_column(item.name, working_df)
-                )
- 
-            elif (
-                isinstance(item, exp.Alias)
-                and isinstance(item.this, exp.Column)
-            ):
- 
-                original = get_column(
-                    item.this.name,
-                    working_df
-                )
- 
-                columns.append(original)
- 
-                working_df = working_df.rename(
-                    columns={original: item.alias}
-                )
- 
-                columns[-1] = item.alias
- 
-            else:
-                raise ValueError(
-                    "Unsupported SELECT expression"
-                )
- 
-        result = working_df[columns].copy()
- 
-    # --------------------------------------
-    # ORDER BY
-    # --------------------------------------
- 
-    order_node = parsed.args.get("order")
- 
-    if order_node:
- 
-        sort_columns = []
-        ascending = []
- 
-        for item in order_node.expressions:
- 
-            if not isinstance(item.this, exp.Column):
-                raise ValueError("ORDER BY supports columns only")
- 
-            column = get_column(
-                item.this.name,
-                result
-            )
- 
-            sort_columns.append(column)
- 
-            ascending.append(
-                not item.args.get("desc", False)
-            )
- 
-        result = result.sort_values(
-            by=sort_columns,
-            ascending=ascending
-        )
- 
-    # --------------------------------------
-    # LIMIT
-    # --------------------------------------
- 
-    limit_node = parsed.args.get("limit")
- 
-    if limit_node:
- 
-        limit_value = limit_node.expression
- 
-        if not isinstance(limit_value, exp.Literal):
-            raise ValueError("LIMIT must be a number")
- 
-        requested_limit = int(limit_value.this)
- 
-        if requested_limit < 0:
-            raise ValueError("LIMIT cannot be negative")
- 
-        result = result.head(
-            min(requested_limit, MAX_ROWS)
-        )
- 
-    else:
- 
-        result = result.head(MAX_ROWS)
- 
-    return result.reset_index(drop=True)
+    return {
+        "status": "success",
+        "count": len(records),
+        "max_records": MAX_ROWS,
+        "truncated": truncated,
+        "data": records
+    }
  
  
-# ==========================================
+# ==================================
 # HOME ENDPOINT
-# ==========================================
+# ==================================
  
 @app.get("/")
 def home():
  
     return {
-        "message": "Excel Pandas SQL API is running"
+        "message": "Excel SQL API is running"
     }
  
  
-# ==========================================
-# HEALTH ENDPOINT
-# ==========================================
+# ==================================
+# HEALTH CHECK
+# ==================================
  
 @app.get("/health")
 def health():
  
     return {
         "status": "healthy",
-        "records_loaded": len(app.state.df)
+        "records_loaded": len(app.state.db.execute(
+            f'SELECT * FROM "{TABLE_NAME}"'
+        ).fetchmany(MAX_ROWS + 1))
     }
  
  
-# ==========================================
-# SQL EXECUTION API
-# SUPPORTS BOTH GET AND POST
-# ==========================================
+# ==================================
+# SQL EXECUTION ENDPOINT
+# GET + POST
+# ==================================
  
 @app.api_route(
     "/execute-sql",
@@ -476,7 +231,9 @@ def execute_sql(
  
     try:
  
-        # Get SQL from GET parameter or POST JSON body
+        # Get query from GET parameter
+        # or POST JSON body
+ 
         if query is not None:
             sql_query = query
  
@@ -489,8 +246,17 @@ def execute_sql(
                 detail="SQL query is required"
             )
  
-        sql_query = sql_query.strip()
+        # Execute SQL
+        result = execute_query(sql_query)
  
-        # Execute translated Pandas query
-        result = execute_pandas_query(
-            sql_query,
+        return result
+ 
+    except HTTPException:
+        raise
+ 
+    except Exception as error:
+ 
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
