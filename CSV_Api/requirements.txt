@@ -1,7 +1,4 @@
 fastapi
-uvicorn[standard]
+uvicorn
 pandas
-duckdb
 openpyxl
-sqlglot
-python-dotenv
