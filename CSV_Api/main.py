@@ -18,7 +18,7 @@ df = pd.read_excel(EXCEL_FILE)
 connection = duckdb.connect(database=":memory:")
  
 # Register Pandas DataFrame as SQL table
-connection.register("Bike_Data", df)
+connection.register("Excel_Data", df)
  
  
 # Request model
@@ -66,7 +66,7 @@ def validate_sql(query):
         tables = statement.find_all(exp.Table)
  
         for table in tables:
-            if table.name.lower() != "employees":
+            if table.name.lower() != "excel_data":
                 return False, f"Unknown table: {table.name}"
  
         return True, None
