@@ -9,7 +9,7 @@ from pathlib import Path
 app = FastAPI(title="NL2SQL Execution API")
  
 # Excel file location
-EXCEL_FILE = Path("data/employees.xlsx")
+EXCEL_FILE = Path("Excel_Data.xlsx")
  
 # Load Excel data
 df = pd.read_excel(EXCEL_FILE)
@@ -18,7 +18,7 @@ df = pd.read_excel(EXCEL_FILE)
 connection = duckdb.connect(database=":memory:")
  
 # Register Pandas DataFrame as SQL table
-connection.register("employees", df)
+connection.register("Bike_Data", df)
  
  
 # Request model
@@ -39,7 +39,7 @@ def health():
 @app.get("/api/v1/schema")
 def get_schema():
     return {
-        "table": "employees",
+        "table": "Bike_data",
         "columns": [
             {"name": col, "type": str(dtype)}
             for col, dtype in df.dtypes.items()
