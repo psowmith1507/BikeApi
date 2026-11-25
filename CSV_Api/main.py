@@ -1,150 +1,109 @@
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-import pandas as pd
-import duckdb
-import sqlglot
-from sqlglot import exp
+
+import sqlite3
 from pathlib import Path
- 
-app = FastAPI(title="NL2SQL Execution API")
- 
+
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+# Initialize FastAPI
+app = FastAPI(title="Pandas SQL Query API")
+
 # Excel file location
-EXCEL_FILE = Path("Excel_Data.xlsx")
- 
-# Load Excel data
+BASE_DIR = Path(__file__).resolve().parent
+EXCEL_FILE = BASE_DIR / "Excel_Data.xlsx"
+
+# Load Excel data into Pandas DataFrame
 df = pd.read_excel(EXCEL_FILE)
- 
-# Create DuckDB connection
-connection = duckdb.connect(database=":memory:")
- 
-# Register Pandas DataFrame as SQL table
-connection.register("Excel_Data", df)
- 
- 
-# Request model
+
+# API request model
 class SQLRequest(BaseModel):
-    query: str = Field(min_length=1)
- 
- 
-# Health endpoint
-@app.get("/health")
-def health():
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="SQL SELECT query to execute against bikes table"
+    )
+
+
+@app.get("/")
+def home():
     return {
-        "status": "healthy",
-        "service": "NL2SQL API"
+        "message": "Pandas SQL API is running"
     }
- 
- 
-# Schema endpoint
-@app.get("/api/v1/schema")
-def get_schema():
+
+
+@app.get("/data")
+def get_data():
+    """Return first 5 records from DataFrame."""
+
     return {
-        "table": "Bike_data",
-        "columns": [
-            {"name": col, "type": str(dtype)}
-            for col, dtype in df.dtypes.items()
-        ]
+        "columns": df.columns.tolist(),
+        "data": df.head().to_dict(orient="records")
     }
- 
- 
-# SQL validation
-def validate_sql(query):
- 
-    try:
-        statements = sqlglot.parse(query, read="duckdb")
- 
-        if len(statements) != 1 or statements[0] is None:
-            return False, "Only one SQL statement is allowed"
- 
-        statement = statements[0]
- 
-        # Only SELECT queries are allowed
-        if not isinstance(statement, exp.Select):
-            return False, "Only SELECT queries are allowed"
- 
-        # Restrict queries to the employees table
-        tables = statement.find_all(exp.Table)
- 
-        for table in tables:
-            if table.name.lower() != "excel_data":
-                return False, f"Unknown table: {table.name}"
- 
-        return True, None
- 
-    except Exception:
-        return False, "Invalid SQL syntax"
- 
- 
-# Main SQL execution endpoint
-@app.post("/api/v1/sql/execute")
+
+
+@app.post("/execute-sql")
 def execute_sql(request: SQLRequest):
- 
+
     query = request.query.strip()
- 
-    # Validate SQL
-    valid, validation_error = validate_sql(query)
- 
-    if not valid:
-        return {
-            "success": False,
-            "status": "VALIDATION_ERROR",
-            "data": None,
-            "error": {
-                "code": "INVALID_SQL",
-                "message": validation_error
-            },
-            "retryable": False
-        }
- 
+
+    # Allow only SELECT and WITH queries
+    if not query.upper().startswith(("SELECT ", "WITH ")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only SELECT queries are allowed"
+        )
+
     try:
-        # Execute SQL
-        result = connection.execute(query).fetchdf()
- 
-        # Empty result
-        if result.empty:
-            return {
-                "success": True,
-                "status": "EMPTY_RESULT",
-                "data": [],
-                "error": None,
-                "retryable": False
-            }
- 
-        # Convert DataFrame to JSON-compatible records
-        records = result.astype(object).where(
-            pd.notna(result), None
-        ).to_dict(orient="records")
- 
+        # Create temporary in-memory SQLite database
+        connection = sqlite3.connect(":memory:")
+
+        # Copy Pandas DataFrame into SQLite table
+        df.to_sql(
+            "bikes",
+            connection,
+            index=False,
+            if_exists="replace"
+        )
+
+        # Make database read-only for query execution
+        connection.execute("PRAGMA query_only = ON")
+
+        # Execute SQL query
+        cursor = connection.execute(query)
+
+        # Get column names
+        columns = [
+            description[0]
+            for description in cursor.description
+        ]
+
+        # Fetch matching records
+        rows = cursor.fetchall()
+
+        # Convert rows into JSON-friendly dictionaries
+        results = [
+            dict(zip(columns, row))
+            for row in rows
+        ]
+
+        connection.close()
+
         return {
-            "success": True,
-            "status": "SUCCESS",
-            "data": records,
-            "error": None,
-            "retryable": False
+            "status": "success",
+            "row_count": len(results),
+            "columns": columns,
+            "data": results
         }
- 
-    except duckdb.Error as e:
- 
-        return {
-            "success": False,
-            "status": "SQL_ERROR",
-            "data": None,
-            "error": {
-                "code": "QUERY_EXECUTION_ERROR",
-                "message": str(e)
-            },
-            "retryable": True
-        }
- 
-    except Exception:
- 
-        return {
-            "success": False,
-            "status": "INTERNAL_ERROR",
-            "data": None,
-            "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": "An unexpected server error occurred"
-            },
-            "retryable": False
-        }
+
+    except sqlite3.Error as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SQL execution error: {str(e)}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
