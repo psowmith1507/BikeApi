@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 EXCEL_FILE = BASE_DIR / "Excel_Data.xlsx"
 
-TABLE_NAME = "excel_data"
+TABLE_NAME = "Bike_data"
 
 
 # --------------------------------
