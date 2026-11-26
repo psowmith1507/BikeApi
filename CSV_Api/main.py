@@ -1,109 +1,221 @@
 
-import sqlite3
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
 from pathlib import Path
-
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+import duckdb
+import sqlglot
+from sqlglot import exp
+import json
 
-# Initialize FastAPI
-app = FastAPI(title="Pandas SQL Query API")
 
-# Excel file location
+# --------------------------------
+# 1. DATA SOURCE CONFIGURATION
+# --------------------------------
+
 BASE_DIR = Path(__file__).resolve().parent
-EXCEL_FILE = BASE_DIR / "Excel_Data.xlsx"
 
-# Load Excel data into Pandas DataFrame
-df = pd.read_excel(EXCEL_FILE)
+EXCEL_FILE = "Excel_Data.xlsx"
 
-# API request model
-class SQLRequest(BaseModel):
-    query: str = Field(
-        ...,
-        min_length=1,
-        description="SQL SELECT query to execute against bikes table"
+TABLE_NAME = "excel_data"
+
+
+# --------------------------------
+# 2. LOAD EXCEL DATA
+# --------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    if not EXCEL_FILE.exists():
+        raise RuntimeError(
+            f"Excel file not found: {EXCEL_FILE}"
+        )
+
+    df = pd.read_excel(EXCEL_FILE)
+
+    connection = duckdb.connect(
+        database=":memory:"
     )
 
+    try:
+        connection.register(
+            "temp_excel",
+            df
+        )
 
-@app.get("/")
-def home():
+        connection.execute(
+            f"""
+            CREATE TABLE {TABLE_NAME}
+            AS SELECT * FROM temp_excel
+            """
+        )
+
+        connection.unregister("temp_excel")
+
+        app.state.conn = connection
+
+        print("Excel data loaded successfully")
+        print("Total records:", len(df))
+        print("Table name:", TABLE_NAME)
+
+        yield
+
+    finally:
+        connection.close()
+
+
+# --------------------------------
+# 3. CREATE FASTAPI APPLICATION
+# --------------------------------
+
+app = FastAPI(
+    title="Excel SQL Execution API",
+    description="Execute SELECT queries on Excel data",
+    lifespan=lifespan
+)
+
+
+# --------------------------------
+# 4. REQUEST MODEL
+# --------------------------------
+
+class SQLRequest(BaseModel):
+    query: str
+
+
+# --------------------------------
+# 5. COMMON RESPONSE FUNCTION
+# --------------------------------
+
+def create_response(
+    status: str,
+    message: str,
+    row_count: int,
+    data,
+    error
+):
     return {
-        "message": "Pandas SQL API is running"
+        "status": status,
+        "message": message,
+        "row_count": row_count,
+        "data": data,
+        "error": error
     }
 
 
-@app.get("/data")
-def get_data():
-    """Return first 5 records from DataFrame."""
-
-    return {
-        "columns": df.columns.tolist(),
-        "data": df.head().to_dict(orient="records")
-    }
-
+# --------------------------------
+# 6. SQL EXECUTION API
+# --------------------------------
 
 @app.post("/execute-sql")
-def execute_sql(request: SQLRequest):
+def execute_sql(
+    request: SQLRequest,
+    http_request: Request
+):
 
     query = request.query.strip()
 
-    # Allow only SELECT and WITH queries
-    if not query.upper().startswith(("SELECT ", "WITH ")):
-        raise HTTPException(
+    # Empty query validation
+    if not query:
+
+        return JSONResponse(
             status_code=400,
-            detail="Only SELECT queries are allowed"
+            content=create_response(
+                status="failure",
+                message="SQL query cannot be empty",
+                row_count=0,
+                data=None,
+                error="Empty SQL query"
+            )
         )
 
     try:
-        # Create temporary in-memory SQLite database
-        connection = sqlite3.connect(":memory:")
 
-        # Copy Pandas DataFrame into SQLite table
-        df.to_sql(
-            "bikes",
-            connection,
-            index=False,
-            if_exists="replace"
+        # Parse SQL query
+        parsed_queries = sqlglot.parse(
+            query,
+            read="duckdb"
         )
 
-        # Make database read-only for query execution
-        connection.execute("PRAGMA query_only = ON")
+        # Reject multiple SQL statements
+        if len(parsed_queries) != 1:
 
-        # Execute SQL query
-        cursor = connection.execute(query)
+            raise ValueError(
+                "Only one SQL statement is allowed"
+            )
 
-        # Get column names
+        parsed_query = parsed_queries[0]
+
+        # Allow only SELECT queries
+        if not isinstance(parsed_query, exp.Select):
+
+            raise ValueError(
+                "Only SELECT queries are allowed"
+            )
+
+        # Execute SQL against Excel data
+        conn = http_request.app.state.conn
+
+        result = conn.execute(query)
+
+        # Convert result to JSON-compatible records
         columns = [
             description[0]
-            for description in cursor.description
+            for description in result.description
         ]
 
-        # Fetch matching records
-        rows = cursor.fetchall()
+        rows = result.fetchall()
 
-        # Convert rows into JSON-friendly dictionaries
-        results = [
+        records = [
             dict(zip(columns, row))
             for row in rows
         ]
 
-        connection.close()
+        # Convert dates, decimals, NaN and other
+        # database values into valid JSON values
+        data = json.loads(
+            json.dumps(
+                records,
+                default=str,
+                allow_nan=False
+            )
+        )
 
-        return {
-            "status": "success",
-            "row_count": len(results),
-            "columns": columns,
-            "data": results
-        }
-
-    except sqlite3.Error as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"SQL execution error: {str(e)}"
+        return create_response(
+            status="success",
+            message="Query executed successfully",
+            row_count=len(data),
+            data=data,
+            error=None
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
+
+        return JSONResponse(
+            status_code=400,
+            content=create_response(
+                status="failure",
+                message="SQL execution failed",
+                row_count=0,
+                data=None,
+                error=str(e)
+            )
         )
+
+
+# --------------------------------
+# 7. HOME API
+# --------------------------------
+
+@app.get("/")
+def home():
+
+    return {
+        "status": "success",
+        "message": "Excel SQL API is running",
+        "data_source": EXCEL_FILE.name,
+        "table_name": TABLE_NAME
+    }
