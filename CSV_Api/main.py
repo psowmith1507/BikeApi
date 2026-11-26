@@ -17,7 +17,7 @@ import json
 
 BASE_DIR = Path(__file__).resolve().parent
 
-EXCEL_FILE = "Excel_Data.xlsx"
+EXCEL_FILE = BASE_DIR / "Excel_Data.xlsx"
 
 TABLE_NAME = "excel_data"
 
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
 
 
 # --------------------------------
-# 3. CREATE FASTAPI APPLICATION
+# 3. FASTAPI APPLICATION
 # --------------------------------
 
 app = FastAPI(
@@ -87,13 +87,13 @@ class SQLRequest(BaseModel):
 
 
 # --------------------------------
-# 5. COMMON RESPONSE FUNCTION
+# 5. COMMON RESPONSE FORMAT
 # --------------------------------
 
 def create_response(
-    status: str,
-    message: str,
-    row_count: int,
+    status,
+    message,
+    row_count,
     data,
     error
 ):
@@ -124,11 +124,11 @@ def execute_sql(
         return JSONResponse(
             status_code=400,
             content=create_response(
-                status="failure",
-                message="SQL query cannot be empty",
-                row_count=0,
-                data=None,
-                error="Empty SQL query"
+                "failure",
+                "SQL query cannot be empty",
+                0,
+                None,
+                "Empty SQL query"
             )
         )
 
@@ -140,7 +140,7 @@ def execute_sql(
             read="duckdb"
         )
 
-        # Reject multiple SQL statements
+        # Allow only one SQL statement
         if len(parsed_queries) != 1:
 
             raise ValueError(
@@ -149,19 +149,18 @@ def execute_sql(
 
         parsed_query = parsed_queries[0]
 
-        # Allow only SELECT queries
+        # Allow only SELECT statements
         if not isinstance(parsed_query, exp.Select):
 
             raise ValueError(
                 "Only SELECT queries are allowed"
             )
 
-        # Execute SQL against Excel data
+        # Execute query
         conn = http_request.app.state.conn
 
         result = conn.execute(query)
 
-        # Convert result to JSON-compatible records
         columns = [
             description[0]
             for description in result.description
@@ -174,8 +173,7 @@ def execute_sql(
             for row in rows
         ]
 
-        # Convert dates, decimals, NaN and other
-        # database values into valid JSON values
+        # Convert values into JSON-compatible format
         data = json.loads(
             json.dumps(
                 records,
@@ -185,11 +183,11 @@ def execute_sql(
         )
 
         return create_response(
-            status="success",
-            message="Query executed successfully",
-            row_count=len(data),
-            data=data,
-            error=None
+            "success",
+            "Query executed successfully",
+            len(data),
+            data,
+            None
         )
 
     except Exception as e:
@@ -197,11 +195,11 @@ def execute_sql(
         return JSONResponse(
             status_code=400,
             content=create_response(
-                status="failure",
-                message="SQL execution failed",
-                row_count=0,
-                data=None,
-                error=str(e)
+                "failure",
+                "SQL execution failed",
+                0,
+                None,
+                str(e)
             )
         )
 
