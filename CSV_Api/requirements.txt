@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 pandas
-openpyxl
 duckdb
+openpyxl
 sqlglot
-pydantic
